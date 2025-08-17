@@ -8,4 +8,5 @@ dependencies = [
     "torch",
     "tensorboard",
     "numpy",
+    "matplotlib",
 ]

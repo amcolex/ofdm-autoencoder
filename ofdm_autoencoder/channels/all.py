@@ -10,33 +10,41 @@ import torch.nn.functional as F
 class TDLChannel(nn.Module):
     """
     Simulates a time-varying, frequency-selective Tapped Delay Line (TDL)
-    Rayleigh fading channel using a differentiable 1D convolution.
+    Rayleigh fading channel using a differentiable grouped 1D convolution.
+    This allows a different channel impulse response per item in the batch.
     """
     def __init__(self, num_taps, apply_prob=1.0):
         super().__init__()
         self.num_taps = num_taps
         self.apply_prob = apply_prob
+        # Manual padding to ensure output length equals input length
+        self.padding = (self.num_taps - 1) // 2
 
     def forward(self, x_time):
-        batch_size = x_time.shape[0]
+        batch_size, num_samples = x_time.shape
 
-        # Conditionally apply fading based on probability
         if not self.training or torch.rand(1).item() > self.apply_prob:
             return x_time
-            
+
         # Generate random complex Gaussian taps for each batch entry
+        # Shape must be (C_out=batch_size, C_in/groups=1, K_size=num_taps)
         taps_real = torch.randn(batch_size, 1, self.num_taps, device=x_time.device)
         taps_imag = torch.randn(batch_size, 1, self.num_taps, device=x_time.device)
-        taps = torch.complex(taps_real, taps_imag) * (1 / (2**0.5))
+
+        # Reshape for grouped convolution: input shape (N=1, C=batch_size, L=num_samples)
+        x_time_reshaped = x_time.unsqueeze(0)
         
-        # Apply channel via complex convolution (as two real convolutions)
-        x_real, x_imag = x_time.real.unsqueeze(1), x_time.imag.unsqueeze(1)
-        taps_real, taps_imag = taps.real, taps.imag
+        # Split into real/imag parts
+        x_real, x_imag = x_time_reshaped.real, x_time_reshaped.imag
         
-        y_real = F.conv1d(x_real, taps_real, padding='same') - F.conv1d(x_imag, taps_imag, padding='same')
-        y_imag = F.conv1d(x_real, taps_imag, padding='same') + F.conv1d(x_imag, taps_real, padding='same')
-        
-        return torch.complex(y_real.squeeze(1), y_imag.squeeze(1))
+        # Apply channel via complex convolution implemented with two real grouped convolutions
+        # Each item in the batch is its own group
+        y_real = F.conv1d(x_real, taps_real, padding=self.padding, groups=batch_size) - F.conv1d(x_imag, taps_imag, padding=self.padding, groups=batch_size)
+        y_imag = F.conv1d(x_real, taps_imag, padding=self.padding, groups=batch_size) + F.conv1d(x_imag, taps_real, padding=self.padding, groups=batch_size)
+
+        # Combine back to complex and reshape to [batch_size, num_samples]
+        y_time_complex_reshaped = torch.complex(y_real, y_imag)
+        return y_time_complex_reshaped.squeeze(0)
 
 class ResidualCFO(nn.Module):
     """
